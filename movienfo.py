@@ -145,7 +145,9 @@ class MovieItem:
 
     @property
     def nfo_path(self) -> Path:
-        return self.stem.with_suffix(".nfo")
+        # NB: do not use Path.with_suffix — titles like "R.I.P.D." or
+        # "Mr. & Mrs. Smith" have trailing/embedded dots it would mangle.
+        return self.stem.with_name(self.stem.name + ".nfo")
 
 
 def strip_part(stem: str) -> str:
