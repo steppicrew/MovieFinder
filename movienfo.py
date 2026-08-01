@@ -378,7 +378,8 @@ class Tmdb:
         self.key = api_key
         self.sess = requests.Session()
 
-    def _get(self, path: str, **params: Any) -> dict[str, Any]:
+    def _request(self, path: str, allow_404: bool,
+                 params: dict[str, Any]) -> dict[str, Any] | None:
         params["api_key"] = self.key
         last: requests.Response | None = None
         for _ in range(4):
@@ -387,11 +388,23 @@ class Tmdb:
                 wait = int(last.headers.get("Retry-After", "2"))
                 time.sleep(wait + 1)
                 continue
+            if last.status_code == 404 and allow_404:
+                return None
             last.raise_for_status()
             return last.json()
         if last is not None:
             last.raise_for_status()
         return {}
+
+    def _get(self, path: str, **params: Any) -> dict[str, Any]:
+        result = self._request(path, allow_404=False, params=params)
+        assert result is not None  # only None when allow_404 and a 404 occurs
+        return result
+
+    def _get_opt(self, path: str, **params: Any) -> dict[str, Any] | None:
+        """Like _get, but returns None on HTTP 404 (e.g. a season that does
+        not exist on TMDB) instead of raising."""
+        return self._request(path, allow_404=True, params=params)
 
     def search(self, title: str, year: int | None, lang: str) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"query": title, "language": lang,
@@ -442,9 +455,11 @@ class Tmdb:
             include_image_language=f"{lang.split('-')[0]},en,null",
         )
 
-    def tv_season(self, tv_id: int, season: int, lang: str) -> dict[str, Any]:
-        return self._get(f"/tv/{tv_id}/season/{season}",
-                         language=lang, append_to_response="credits")
+    def tv_season(self, tv_id: int, season: int,
+                  lang: str) -> dict[str, Any] | None:
+        """Season details, or None if TMDB has no such season (404)."""
+        return self._get_opt(f"/tv/{tv_id}/season/{season}",
+                             language=lang, append_to_response="credits")
 
 
 # --------------------------------------------------------------------------- #
@@ -892,6 +907,7 @@ def process_series(item: SeriesItem, tmdb: Tmdb, dry_run: bool) -> str:
 
         show = tmdb.tv_details(choice["id"], item.lang)
 
+        wrote = 0
         # tvshow.nfo
         if not item.tvshow_nfo.exists():
             if dry_run:
@@ -900,15 +916,20 @@ def process_series(item: SeriesItem, tmdb: Tmdb, dry_run: bool) -> str:
                 item.tvshow_nfo.write_text(build_tvshow_nfo(show, item.lang),
                                            encoding="utf-8")
                 print(f"  ✔ wrote {item.tvshow_nfo}")
+            wrote += 1
 
-        # Episodes — fetch each needed season once and cache it.
-        season_cache: dict[int, dict[str, Any]] = {}
-        wrote = 0
+        # Episodes — fetch each needed season once and cache it. A cached
+        # value of None means TMDB has no such season (404).
+        season_cache: dict[int, dict[str, Any] | None] = {}
         for ep in item.missing_episodes():
-            season_data = season_cache.get(ep.season)
+            if ep.season not in season_cache:
+                season_cache[ep.season] = tmdb.tv_season(
+                    choice["id"], ep.season, item.lang)
+            season_data = season_cache[ep.season]
             if season_data is None:
-                season_data = tmdb.tv_season(choice["id"], ep.season, item.lang)
-                season_cache[ep.season] = season_data
+                print(f"    ! S{ep.season:02d}E{ep.episode:02d}: season "
+                      f"{ep.season} not on TMDB ({ep.media.name})")
+                continue
             ep_obj = next(
                 (e for e in season_data.get("episodes", [])
                  if e.get("episode_number") == ep.episode), None)
@@ -924,7 +945,9 @@ def process_series(item: SeriesItem, tmdb: Tmdb, dry_run: bool) -> str:
                 ep.nfo_path.write_text(nfo, encoding="utf-8")
                 print(f"    ✔ S{ep.season:02d}E{ep.episode:02d} -> {ep.nfo_path.name}")
             wrote += 1
-        return "dry-run" if dry_run else "written"
+        if dry_run:
+            return "dry-run"
+        return "written" if wrote else "skipped"
 
 
 def run_movies(roots: list[Root], tmdb: Tmdb | None, args: argparse.Namespace,
