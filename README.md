@@ -39,6 +39,16 @@ fallback.
 
 ## Usage
 
+The `movienfo.sh` wrapper is the simplest way to start — it locates the script
+and `.env` regardless of your current directory and forwards any arguments:
+
+```bash
+./movienfo.sh              # interactive run
+./movienfo.sh --dry-run    # preview only
+```
+
+Or call the Python entry point directly:
+
 ```bash
 # List movies missing an NFO (no key needed):
 ./movienfo.py --list
